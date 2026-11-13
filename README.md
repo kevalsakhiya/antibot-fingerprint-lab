@@ -1,144 +1,168 @@
 # Anti-Bot Fingerprint Lab
 
-**A hands-on reverse-engineering of how modern anti-bot systems identify automated clients — and how resilient scrapers defeat each layer.**
+**A hands-on look at how websites tell real browsers apart from bots — and how scrapers slip past those checks.**
 
-Most "web scraping" portfolios show a BeautifulSoup script. This one shows the
-layer underneath: *why* a naive scraper gets blocked at the TLS handshake
-before a single byte of HTML is served, and what it takes to pass. It
-implements the detector's logic from scratch (pure Python, no black-box
-libraries) and demonstrates the evasion ladder against it.
-
-I built this because the hard part of large-scale crawling isn't parsing — it's
-staying indistinguishable from a real browser across four independent
-fingerprinting surfaces at once. This repo is the defender and the attacker in
-one place.
+![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)
+![Tests 7/7](https://img.shields.io/badge/tests-7%2F7%20passing-brightgreen)
+![License MIT](https://img.shields.io/badge/license-MIT-black)
 
 ---
 
-## The four fingerprinting surfaces
+## What does this repo do?
 
-An anti-bot system (Cloudflare, DataDome, Akamai, PerimeterX) scores a client
-on signals that live *below* anything a `User-Agent` header can spoof. Each is
-implemented here as readable Python:
+When you try to scrape a big website, it often blocks you **before you even
+get the page** — even if your code sets a perfect "I am Chrome" label. How?
+The website looks at dozens of tiny technical fingerprints that a real browser
+leaves behind and a script usually doesn't.
 
-| # | Surface | What it reads | Module |
-|---|---------|---------------|--------|
-| 1 | **TLS (JA3/JA3S)** | Cipher suites, extensions, curves & EC point formats in the ClientHello | [`fingerprint/ja3.py`](fingerprint/ja3.py) |
-| 2 | **HTTP/2 (Akamai)** | SETTINGS frame, window-update, priority tree, pseudo-header order | [`fingerprint/http2.py`](fingerprint/http2.py) |
-| 3 | **HTTP headers** | Header *order* + presence of `sec-ch-ua`/`sec-fetch-*` client hints | [`fingerprint/headers.py`](fingerprint/headers.py) |
-| 4 | **Browser / JS** | `navigator.webdriver`, canvas/WebGL hash, plugins, software-GL tells | [`web/fingerprint.html`](web/fingerprint.html) |
+This repo **builds that bot-detector from scratch, in plain Python**, so you can
+see exactly what those fingerprints are — and then shows the three ways a
+scraper defeats them, one layer at a time.
 
-The detector ([`detector/`](detector/)) combines them into a single 0–100
-bot-likelihood score. Because the signals are independent, an evader has to get
-**all four** right simultaneously — which is exactly why a spoofed User-Agent
-on `requests` is useless and why TLS-impersonating clients exist.
+Think of it as a lock and a set of keys, in the same box:
+- the **lock** (`detector/`) is a mini version of what Cloudflare / DataDome do,
+- the **keys** (`clients/`) are three scrapers, from "gets caught instantly" to
+  "looks exactly like a real person."
+
+Everything here runs locally and has **no setup** — the core needs nothing but
+Python. It's a learning tool and a portfolio piece, not a service.
+
+---
+
+## The problem, in one example
+
+You write a scraper and set the `User-Agent` header to Chrome's. You'd think the
+site now believes you're Chrome. It doesn't. Run the demo in this repo and the
+detector flags your scraper anyway:
+
+```
+Bot verdict : suspicious (score 55/100)
+  ⚠ UA claims Chrome but is missing 6 of Chrome's normal headers
+  ⚠ the ORDER of your headers doesn't match Chrome's
+```
+
+The label said "Chrome," but the fingerprint underneath didn't. **That gap is
+what this repo is about** — and closing it is the real skill in large-scale
+scraping.
+
+---
+
+## The four things a website checks
+
+A bot-detector scores you on signals that live *underneath* the headers you can
+easily fake. This repo implements all four as readable Python:
+
+| # | Check | In plain terms | Code |
+|---|-------|----------------|------|
+| 1 | **TLS / JA3** | The way your code opens the secure (https) connection has a "handshake signature." Chrome's and Python's are different. | [`fingerprint/ja3.py`](fingerprint/ja3.py) |
+| 2 | **HTTP/2** | The low-level settings your client sends when it starts talking. Browsers and code libraries send different ones. | [`fingerprint/http2.py`](fingerprint/http2.py) |
+| 3 | **Headers** | The *order* of your request headers, and whether you include the extra ones (`sec-ch-ua`, `sec-fetch-*`) that only real browsers send. | [`fingerprint/headers.py`](fingerprint/headers.py) |
+| 4 | **Browser / JavaScript** | Signals the page reads from inside the browser: is `navigator.webdriver` on? is the graphics card real or fake? | [`web/fingerprint.html`](web/fingerprint.html) |
+
+The detector ([`detector/`](detector/)) adds these up into one **0–100 bot
+score**. Because the four checks are independent, a scraper has to pass **all of
+them at once** — which is why faking just the `User-Agent` never works.
 
 ---
 
 ## Quickstart
 
-No third-party dependencies required for the core (pure stdlib Python 3.11+).
+No installation needed for the core — just Python 3.11+.
 
 ```bash
-# 1. Fingerprint a real ClientHello generated by your local TLS stack
+# 1. Fingerprint a real secure-connection handshake from your own machine
 python fingerprint/ja3.py
 
-# 2. Run the self-tests (generate a real handshake, assert the parsers)
+# 2. Run the tests (they create a real handshake and check the parser)
 python tests/test_fingerprint.py
 
-# 3. Live detector demo — start the server, then hit it with a naive scraper
-python -m detector.server http          # terminal 1
-python clients/vanilla_requests.py       # terminal 2
-
-# 4. Capture a JA3 straight off the socket
-python -m detector.server tls            # terminal 1
-curl -sk https://127.0.0.1:8443/          # terminal 2 (handshake fails — fine)
+# 3. See the live detector catch a naive scraper
+python -m detector.server http       # terminal 1: start the detector
+python clients/vanilla_requests.py    # terminal 2: scrape it, watch it get flagged
 ```
 
-### Real output (committed, reproducible)
+---
 
-`python fingerprint/ja3.py` parsing a live ClientHello:
+## See it in action
+
+**Fingerprinting a real handshake** (`python fingerprint/ja3.py`):
 
 ```
-SNI          : example.com
-ciphers      : 17
-extensions   : [65281, 0, 11, 10, 35, 22, 23, 13, 43, 45, 51]
-JA3 string   : 771,4866-4867-4865-49196-...,65281-0-11-10-35-22-23-13-43-45-51,...,0
-JA3 (md5)    : f21f8e6cf70d5980ecfe9fa2e0ef401c
+SNI        : example.com
+ciphers    : 17
+JA3 string : 771,4866-4867-4865-49196-...,65281-0-11-10-35-22-23-13-43-45-51,...,0
+JA3 (md5)  : f21f8e6cf70d5980ecfe9fa2e0ef401c
 ```
 
-`python clients/vanilla_requests.py` against the detector:
+That `JA3 (md5)` is the connection's "signature." A real Chrome produces a
+specific one; Python produces a different one — and detectors keep lists of both.
+
+**A naive scraper hitting the detector** (`python clients/vanilla_requests.py`):
 
 ```
 Header order the server saw : ['Accept-Encoding', 'Host', 'User-Agent', 'Connection']
 Bot verdict                 : suspicious (score 55/100)
-  ⚠ missing_client_hints (+35) — UA claims Chrome but lacks 6 sec-ch/sec-fetch header(s)
-  ⚠ header_order (+20) — header order similarity to Chrome = 0.333
 ```
 
-The scraper set a perfect Chrome `User-Agent` — and still scored 55/100,
-because header order and client hints gave it away. That gap is the whole game.
+It set a flawless Chrome `User-Agent` — and still scored 55/100, because the
+header order and missing client-hint headers gave it away.
 
 ---
 
-## The evasion ladder
+## The three scrapers (the evasion ladder)
 
-Three clients in [`clients/`](clients/), from easiest-to-detect to hardest,
-each defeating one more surface:
+The `clients/` folder has three scrapers, each one defeating one more check:
 
-| Client | TLS (JA3) | HTTP/2 | Headers | JS surface | Verdict |
-|--------|:---------:|:------:|:-------:|:----------:|---------|
-| `vanilla_requests.py` (stdlib) | ❌ Python | ❌ | ❌ | n/a | **flagged** |
-| `impersonate_curlcffi.py` (curl-impersonate) | ✅ real Chrome | ✅ | ⚠ partial | n/a | passes TLS |
-| `browser_playwright.py` (+ stealth patches) | ✅ real Chrome | ✅ | ✅ | ✅ patched | passes all |
+| Scraper | TLS handshake | Headers | Browser signals | Result |
+|---------|:-------------:|:-------:|:---------------:|--------|
+| `vanilla_requests.py` (plain Python) | ❌ looks like Python | ❌ wrong | — | **caught** |
+| `impersonate_curlcffi.py` (TLS impersonation) | ✅ looks like Chrome | ⚠ partly | — | passes the TLS check |
+| `browser_playwright.py` (real browser + tweaks) | ✅ real Chrome | ✅ real | ✅ cleaned up | **passes everything** |
 
-The lesson the table encodes: evasion is additive. You don't "bypass Cloudflare"
-with one trick — you climb the ladder until every surface matches a real
-browser, then keep proxy reputation and request cadence clean on top.
+The lesson: you don't beat a bot-detector with one clever trick. You climb the
+ladder until **every** signal matches a real browser.
 
 ---
 
-## Repository layout
+## What's in here
 
 ```
-fingerprint/     # the signal parsers (pure Python, the core IP of the repo)
-  ja3.py         #   TLS ClientHello → JA3 (byte-level parser, GREASE-stripped)
-  http2.py       #   HTTP/2 frames → Akamai fingerprint
-  headers.py     #   header order + UA-consistency analysis
-detector/        # the "target": scores requests, serves a verdict
-  server.py      #   HTTP header detector + raw-socket JA3 sniffer
-  score.py       #   combine signals → 0-100 bot score with reasons
-clients/         # the evasion ladder (naive → TLS-impersonating → full browser)
-web/             # client-side JS fingerprint probe (open in real vs headless)
-tests/           # self-contained, network-free parser tests
+fingerprint/     the detection logic, in plain Python (the heart of the repo)
+  ja3.py         reads a TLS handshake and computes its JA3 signature
+  http2.py       reads HTTP/2 settings and builds the fingerprint
+  headers.py     checks header order and "is this really Chrome?"
+detector/        the "target": scores a request and returns a verdict
+clients/         the three scrapers, from easy-to-catch to undetectable
+web/             a web page that reads the in-browser signals
+tests/           quick tests that need no internet and no extra installs
 ```
 
-## Optional dependencies
+## Requirements
 
-The core runs on the standard library alone. Two demos need extras:
+The core (parsers, detector, tests) runs on the **Python 3.11+ standard library —
+nothing to install.** Two of the scraper demos need an extra package each:
 
 ```bash
-pip install curl_cffi                        # clients/impersonate_curlcffi.py
-pip install playwright && playwright install chromium   # clients/browser_playwright.py
+pip install curl_cffi                                      # for impersonate_curlcffi.py
+pip install playwright && playwright install chromium       # for browser_playwright.py
 ```
 
-They're kept out of a hard `requirements.txt` so the repo stays import-clean and
-the parsers/tests run anywhere.
+They're kept optional so the repo runs anywhere out of the box.
 
 ## Scope & honesty
 
-- The JA3/JA3S and Akamai HTTP/2 algorithms are implemented faithfully; the
-  **reference** fingerprints in `http2.py` are illustrative — verify against
-  your own captures (`tls.peet.ws/api/all`, `tls.browserleaks.com/json`) before
-  treating any single hash as canonical "Chrome", since they shift per version.
-- The detector is a teaching model of commercial systems, not a reimplementation
-  of any specific vendor.
-- Everything here targets a **local, controlled** endpoint. Apply the technique
-  only to systems you're authorized to test.
+- The JA3 and HTTP/2 algorithms are implemented faithfully. The *example*
+  "this is what Chrome looks like" fingerprints are illustrative — they shift
+  with each browser version, so check against a live capture
+  (e.g. `tls.peet.ws/api/all`) before treating any single value as final.
+- The detector is a teaching model of how commercial systems work, not a copy
+  of any specific one.
+- Everything targets a **local, controlled** endpoint. Only use these techniques
+  on systems you're allowed to test.
 
 ## About
 
-Built by **Keval Sakhiya** — web-scraping / anti-bot engineer, winner of
+Built by **Keval Sakhiya** — web-scraping / anti-bot engineer and winner of
 [Zyte's Extract Summit](https://www.zyte.com) web-scraping coding competition
 (2023). More work: [kevalsakhiya.github.io](https://kevalsakhiya.github.io).
 
